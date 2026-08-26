@@ -31,8 +31,13 @@ librelyrics config edit
 
 ## Supported URLs
 
+- `https://music.apple.com/<region>/song/<name>/<id>`
 - `https://music.apple.com/<region>/album/<name>/<id>?i=<track_id>`
 - `https://music.apple.com/<region>/album/<name>/<id>`
+
+Lyrics are fetched from Apple Music's AMP API using your account storefront
+(not only the country code in the URL). A `/in/song/...` link still works if
+your Apple Music account is in another country.
 
 ## Usage
 
