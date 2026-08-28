@@ -121,8 +121,8 @@ def parse_ttml(ttml: str) -> tuple[list[LyricsLine], bool, bool]:
     for paragraph in soup.find_all("p"):
         spans = paragraph.find_all("span", recursive=False)
         text = " ".join(paragraph.get_text().split())
-        start_ms = parse_timestamp(paragraph.get("begin")) if is_synced else None
-        end_ms = parse_timestamp(paragraph.get("end")) if is_synced and paragraph.get("end") else None
+        start_ms = parse_timestamp(str(paragraph.get("begin"))) if is_synced else None
+        end_ms = parse_timestamp(str(paragraph.get("end"))) if is_synced and paragraph.get("end") else None
 
         words = None
         if is_rich and spans:
@@ -132,8 +132,8 @@ def parse_ttml(ttml: str) -> tuple[list[LyricsLine], bool, bool]:
                 word_parts.append(
                     LyricsWord(
                         word=word_text,
-                        start_ms=parse_timestamp(span.get("begin")),
-                        end_ms=parse_timestamp(span.get("end")),
+                        start_ms=parse_timestamp(str(span.get("begin"))),
+                        end_ms=parse_timestamp(str(span.get("end"))),
                     )
                 )
             words = tuple(word_parts)
@@ -252,7 +252,7 @@ class AppleMusicModule(LyricsModule):
         still 404 lyrics when the account is ``us`` (and vice versa).
         """
         try:
-            resp = self._session.get(
+            resp = self.session.get(
                 f"{AMP_API_URL}/v1/me/account",
                 params={"meta": "subscription"},
                 timeout=10,
@@ -303,8 +303,7 @@ class AppleMusicModule(LyricsModule):
 
     def _storefronts_to_try(self, url_region: str) -> list[str]:
         storefronts: list[str] = []
-        if self._session is None:
-            self._ensure_session()
+        self.session
         if self._account_storefront:
             storefronts.append(self._account_storefront)
         if url_region and url_region not in storefronts:
