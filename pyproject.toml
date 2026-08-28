@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "librelyrics-applemusic"
-version = "1.0.0"
+version = "1.0.1"
 description = "Apple Music lyrics provider plugin for LibreLyrics"
 readme = "README.md"
 license = {text = "GPL-3.0-or-later"}
