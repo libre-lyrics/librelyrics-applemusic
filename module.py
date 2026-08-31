@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 
 from librelyrics.exceptions import (ConfigurationError, LyricsNotFound,
                                     ProviderError)
-from librelyrics.models import LyricsLine, LyricsResponse, LyricsWord
+from librelyrics.models import LyricsLine, LyricsResponse, LyricsWord, TrackQuery
 from librelyrics.modules.base import (LyricsModule, LyricsType,
                                       ModuleCapability, ModuleMeta)
 
@@ -157,6 +157,7 @@ class AppleMusicModule(LyricsModule):
     """
 
     META: ClassVar[ModuleMeta] = ModuleMeta(
+        id="applemusic",
         name="Apple Music",
         regex=APPLE_MUSIC_PATTERN,
         requires_auth=True,
@@ -165,16 +166,38 @@ class AppleMusicModule(LyricsModule):
         capabilities=frozenset({
             ModuleCapability.SINGLE_TRACK,
             ModuleCapability.ALBUM,
+            ModuleCapability.RESOLVE,
+            ModuleCapability.SEARCH,
         }),
         config_schema={
             "media_user_token": "Apple Music media-user-token cookie",
         },
     )
-    LIBRELYRICS_API_VERSION: ClassVar[int] = 1
+    LIBRELYRICS_API_VERSION: ClassVar[int] = 2
     _cached_developer_token: ClassVar[str | None] = None
 
-    def __init__(self, url: str, config: dict) -> None:
-        super().__init__(url, config)
+    @classmethod
+    def matches(cls, query: TrackQuery) -> bool:
+        if query.url:
+            return super().matches(query)
+        return bool(query.artist and query.title)
+
+    @classmethod
+    def classify_url(cls, url: str | None) -> str | None:
+        if not url:
+            return None
+        try:
+            parsed = parse_apple_music_url(url)
+        except ValueError:
+            return None
+        if parsed["kind"] == "album" and not parsed.get("track_id"):
+            return "album"
+        if parsed["kind"] in ("album", "song"):
+            return "track"
+        return None
+
+    def __init__(self, query: TrackQuery, config: dict) -> None:
+        super().__init__(query, config)
         self._session: requests.Session | None = None
         self._account_storefront: str | None = None
 
@@ -310,8 +333,134 @@ class AppleMusicModule(LyricsModule):
             storefronts.append(url_region)
         return storefronts or [url_region or "us"]
 
+    def resolve(self) -> TrackQuery:
+        """Resolve Apple Music track metadata from URL."""
+        if not self.url:
+            return self.query
+        try:
+            data = self._parse_url()
+            track_id = data.get("track_id")
+            if not track_id:
+                return self.query
+            song = None
+            for storefront in self._storefronts_to_try(data.get("region", "us")):
+                try:
+                    song = self._get_song(storefront, track_id)
+                except Exception:
+                    continue
+                if song:
+                    break
+            if not song:
+                return self.query
+            attrs = song.get("attributes", {})
+            return TrackQuery(
+                url=self.url,
+                artist=self.query.artist or attrs.get("artistName"),
+                title=self.query.title or attrs.get("name"),
+                album=self.query.album or attrs.get("albumName"),
+                duration_ms=self.query.duration_ms or attrs.get("durationInMillis"),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to resolve Apple Music track: {e}")
+            return self.query
+
+    def list_tracks(self) -> list[TrackQuery]:
+        """List metadata for every track in the Apple Music album."""
+        if not self.url:
+            return []
+        data = self._parse_url()
+        if data["kind"] == "song" or data.get("track_id"):
+            return [self.resolve()]
+
+        album_id = data.get("album_id")
+        if not album_id:
+            return []
+
+        last_error: Exception | None = None
+        for storefront in self._storefronts_to_try(data.get("region", "us")):
+            try:
+                resp = self.session.get(
+                    catalog_album_url(storefront, album_id),
+                    params={"include": "tracks"},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                album_attrs = payload["data"][0].get("attributes", {})
+                album_name = album_attrs.get("name")
+                tracks_data = (
+                    payload["data"][0]
+                    .get("relationships", {})
+                    .get("tracks", {})
+                    .get("data", [])
+                )
+                queries: list[TrackQuery] = []
+                for t in tracks_data:
+                    t_attrs = t.get("attributes", {})
+                    t_url = t_attrs.get("url") or (
+                        f"https://music.apple.com/{storefront}/song/{t.get('id')}"
+                    )
+                    queries.append(
+                        TrackQuery(
+                            url=t_url,
+                            artist=t_attrs.get("artistName") or album_attrs.get("artistName"),
+                            title=t_attrs.get("name"),
+                            album=album_name,
+                            duration_ms=t_attrs.get("durationInMillis"),
+                        )
+                    )
+                return queries
+            except Exception as e:
+                last_error = e
+                continue
+        raise ProviderError(f"Failed to list album tracks: {last_error}") from last_error
+
+    def _search_term(self) -> str:
+        artist = (self.query.artist or "").strip()
+        title = (self.query.title or "").strip()
+        if not artist or not title:
+            raise LyricsNotFound("Artist and title are required to search Apple Music")
+        return f"{artist} {title}"
+
+    def _search_song_id(self) -> tuple[str, str]:
+        """Return (storefront, song_id) for the metadata query."""
+        term = self._search_term()
+        last_error: Exception | None = None
+        for storefront in self._storefronts_to_try("us"):
+            try:
+                resp = self.session.get(
+                    f"{AMP_API_URL}/v1/catalog/{storefront}/search",
+                    params={"term": term, "types": "songs", "limit": "5"},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                songs = (
+                    resp.json()
+                    .get("results", {})
+                    .get("songs", {})
+                    .get("data", [])
+                )
+                if not songs:
+                    continue
+                song_id = songs[0].get("id")
+                if song_id:
+                    return storefront, str(song_id)
+            except Exception as e:
+                last_error = e
+                continue
+        raise LyricsNotFound(
+            f"No Apple Music match for: {term}"
+            + (f" ({last_error})" if last_error else "")
+        )
+
     def fetch(self) -> LyricsResponse:
-        """Fetch lyrics for the configured URL."""
+        """Fetch lyrics for the configured URL or metadata search."""
+        if not self.url:
+            storefront, track_id = self._search_song_id()
+            return self._fetch_track_lyrics(
+                track_id, {"region": storefront, "kind": "song", "track_id": track_id}
+            )
+
         data = self._parse_url()
 
         if data["kind"] == "song" or data.get("track_id"):
